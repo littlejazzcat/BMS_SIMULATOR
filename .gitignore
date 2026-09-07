@@ -1,0 +1,29 @@
+# ===== 参考与独立项目（不纳入本仓库）=====
+BMS_参考/
+protocol_converter/
+
+# ===== 文档与记录（本地维护，不入库）=====
+architecture/
+update/
+issue/
+tests/
+GBT27930/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ===== 数据库 =====
+*.db
+*.db-shm
+*.db-wal
+
+# ===== Obsidian =====
+.obsidian/
+
+# ===== 系统杂项 =====
+.DS_Store
+Thumbs.db

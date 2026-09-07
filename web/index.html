@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BMS 模拟器</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f0f2f5; color: #1a1a2e; }
+
+  /* ── 顶部导航 ── */
+  .navbar { background: #1a1a2e; color: #fff; padding: 0 24px; display: flex; align-items: center; height: 52px; }
+  .nav-brand { font-size: 18px; font-weight: 700; margin-right: 32px; }
+  .nav-links a { color: #ccc; text-decoration: none; margin-right: 20px; font-size: 14px; cursor: pointer; padding: 16px 0; border-bottom: 2px solid transparent; }
+  .nav-links a:hover { color: #fff; }
+  .nav-links a.active { color: #fff; border-bottom-color: #1a73e8; }
+
+  /* ── 连接状态横条 ── */
+  .conn-bar {
+    display: flex; align-items: center; gap: 14px; padding: 10px 24px;
+    background: #fff; border-bottom: 1px solid #e0e0e0; flex-wrap: wrap;
+  }
+  .conn-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #ccc; }
+  .conn-dot.online { background: #34a853; }
+  .conn-dot.connecting { background: #ff9800; }
+  .conn-status { font-size: 13px; font-weight: 500; padding: 2px 8px; border-radius: 10px; color: #999; background: #f5f5f5; }
+  .conn-status.online { color: #34a853; background: #e8f5e9; }
+  .conn-label { font-size: 12px; color: #999; }
+  .conn-divider { width: 1px; height: 24px; background: #e0e0e0; }
+  .state-text { font-size: 14px; font-weight: 600; color: #1a73e8; }
+  .counters { font-size: 12px; color: #666; margin-left: auto; }
+  .counters b { font-family: 'Consolas', monospace; }
+  .err-text { font-size: 12px; color: #ea4335; }
+
+  input, select { padding: 7px 10px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; background: #fff; color: #333; outline: none; }
+  input:focus, select:focus { border-color: #1a73e8; }
+  button {
+    padding: 7px 16px; border: 1px solid #ddd; background: #fff; border-radius: 6px;
+    cursor: pointer; font-size: 13px; color: #333; transition: all .15s;
+  }
+  button:hover { background: #f5f5f5; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.btn-primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  button.btn-primary:hover { background: #1665c8; }
+  button.btn-success { background: #34a853; color: #fff; border-color: #34a853; }
+  button.btn-success:hover { background: #2d9249; }
+  button.btn-danger { background: #ea4335; color: #fff; border-color: #ea4335; }
+  button.btn-danger:hover { background: #d33426; }
+
+  /* ── 主体 ── */
+  .container { max-width: 1200px; margin: 20px auto; padding: 0 20px; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── BMS 参数设置：报文 Tab + 字段 ── */
+  .param-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .param-head h1 { font-size: 22px; }
+  .msg-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; background: #fff; padding: 12px 16px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .msg-tab { padding: 6px 16px; border: 1px solid #ddd; background: #fff; border-radius: 6px; cursor: pointer; font-size: 13px; color: #555; transition: all .15s; }
+  .msg-tab:hover { border-color: #1a73e8; color: #1a73e8; }
+  .msg-tab.active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  .msg-fields-panel { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 16px 20px; }
+  .msg-fields-panel .panel-title { font-size: 15px; font-weight: 600; color: #333; margin-bottom: 10px; }
+  .config-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #f7f7f7; }
+  .config-row:last-child { border-bottom: none; }
+  .config-row label { font-size: 13px; color: #555; width: 200px; flex-shrink: 0; }
+  .config-row input { width: 140px; text-align: left; }
+  .config-row select { width: 160px; text-align: left; }
+  .config-row .unit { font-size: 12px; color: #999; min-width: 40px; }
+
+  /* ── 充电记录（预留） ── */
+  .placeholder { background: #fff; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); padding: 60px 20px; text-align: center; color: #999; font-size: 15px; }
+
+  /* ── CAN 报文（浅色日志） ── */
+  .msg-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fff; border: 1px solid #e0e0e0; border-radius: 10px 10px 0 0; }
+  .msg-toolbar span { font-size: 12px; color: #888; }
+  .log-container {
+    height: calc(100vh - 220px); overflow-y: auto; background: #fafafa;
+    border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px;
+    padding: 10px 14px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.7;
+  }
+  .log-placeholder { color: #999; padding: 20px; text-align: center; font-family: -apple-system, sans-serif; }
+  .log-line { white-space: nowrap; }
+  .log-ts { color: #999; font-size: 12px; }
+  .log-dir { font-weight: 700; }
+  .log-dir.tx { color: #34a853; }
+  .log-dir.rx { color: #1a73e8; }
+  .log-abbr { font-weight: 700; color: #333; }
+  .log-id { color: #888; }
+  .log-hex { color: #333; }
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="nav-brand">⚡ BMS 模拟器</div>
+  <div class="nav-links">
+    <a class="active" data-tab="params">BMS参数设置</a>
+    <a data-tab="records">充电记录</a>
+    <a data-tab="messages">CAN报文</a>
+  </div>
+</nav>
+
+<div class="conn-bar">
+  <span class="conn-dot" id="canDot"></span>
+  <span class="conn-status" id="canState">未连接</span>
+  <span class="conn-label">设备</span>
+  <select id="devType">
+    <option value="USBCAN-E-U">USBCAN-E-U</option>
+    <option value="USBCAN-2E-U">USBCAN-2E-U</option>
+    <option value="USBCAN-4E-U">USBCAN-4E-U</option>
+    <option value="USBCAN-8E-U">USBCAN-8E-U</option>
+    <option value="Mock">Mock（离线模拟）</option>
+  </select>
+  <span class="conn-label">通道</span>
+  <select id="channel"><option value="0">0</option><option value="1">1</option></select>
+  <span class="conn-label">波特率</span>
+  <select id="baudrate">
+    <option value="50000">50 kbps</option>
+    <option value="100000">100 kbps</option>
+    <option value="125000">125 kbps</option>
+    <option value="250000" selected>250 kbps</option>
+    <option value="500000">500 kbps</option>
+    <option value="800000">800 kbps</option>
+    <option value="1000000">1000 kbps</option>
+  </select>
+  <button id="btnConnect" class="btn-primary">连接</button>
+  <button id="btnDisconnect" class="btn-danger" disabled>断开</button>
+
+  <span class="conn-divider"></span>
+
+  <span class="conn-label">状态机</span>
+  <span class="state-text" id="stateText">未启动</span>
+  <span class="conn-label">模式</span>
+  <select id="modeSel">
+    <option value="gb" selected>国标</option>
+    <option value="fast">FAST</option>
+    <option value="adaptive">自适应</option>
+  </select>
+  <button id="btnStart" class="btn-success">启动充电</button>
+  <button id="btnStop" class="btn-danger" disabled>停止充电</button>
+
+  <span class="counters">TX <b id="txCount">0</b> &nbsp; RX <b id="rxCount">0</b></span>
+  <span class="err-text" id="errText"></span>
+</div>
+
+<main class="container">
+  <!-- BMS 参数设置 -->
+  <div class="tab-panel active" id="tab-params">
+    <div class="param-head">
+      <h1>BMS 参数设置</h1>
+      <button id="btnApply" class="btn-primary">应用参数</button>
+      <span id="applyHint" style="font-size:13px;color:#34a853"></span>
+    </div>
+    <div id="msgTabs" class="msg-tabs"></div>
+    <div id="msgFields"></div>
+  </div>
+
+  <!-- 充电记录（预留） -->
+  <div class="tab-panel" id="tab-records">
+    <div class="placeholder">充电记录功能预留，后续补充</div>
+  </div>
+
+  <!-- CAN 报文 -->
+  <div class="tab-panel" id="tab-messages">
+    <div class="msg-toolbar">
+      <span>收发报文流</span>
+      <span class="conn-label">（绿色=发送 TX，蓝色=接收 RX）</span>
+      <button id="btnFirst" title="首页">⏮ 首页</button>
+      <button id="btnPrev" title="上一页">◀ 上一页</button>
+      <span id="pageInfo" style="font-size:12px;color:#888;min-width:130px;text-align:center"></span>
+      <button id="btnNext" title="下一页">下一页 ▶</button>
+      <button id="btnLast" title="末页">末页 ⏭</button>
+      <span class="conn-label">每页</span>
+      <select id="pageSize" style="padding:3px 6px;font-size:12px">
+        <option value="50">50</option>
+        <option value="100">100</option>
+        <option value="200" selected>200</option>
+        <option value="500">500</option>
+      </select>
+      <span style="flex:1"></span>
+      <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:4px">
+        <input type="checkbox" id="chkPause"> 暂停滚动
+      </label>
+      <button id="btnExport" title="导出全部报文为 CSV">📋 导出</button>
+      <button id="btnClear">清空</button>
+    </div>
+    <div class="log-container" id="msgList">
+      <div class="log-placeholder">暂无报文，连接 CAN 并启动充电后这里会显示收发帧</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let wsMsg = null, wsState = null;
+
+// ── Tab 切换 ──
+document.querySelectorAll('.nav-links a').forEach(a => {
+  a.onclick = () => {
+    document.querySelectorAll('.nav-links a').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    $('tab-' + a.dataset.tab).classList.add('active');
+  };
+});
+
+// ── 报文流（批量渲染 + 历史分页）──
+let paused = false;
+let currentOffset = 0;
+let PAGE_SIZE = 200;
+let total = 0;
+let browsing = false;  // true=历史浏览态（翻页看历史），false=实时流态
+
+function buildLine(m) {
+  const dir = m.direction === 'tx' ? 'TX' : 'RX';
+  const abbr = m.abbr || '—';
+  const id = '0x' + m.can_id.toString(16).toUpperCase().padStart(8, '0');
+  return `<div class="log-line"><span class="log-ts">${m.time}</span> ` +
+    `<span class="log-dir ${m.direction}">${dir}</span> ` +
+    `<span class="log-abbr">${abbr}</span> ` +
+    `<span class="log-id">${id}</span> ` +
+    `<span class="log-hex">${m.data_hex}</span></div>`;
+}
+
+let pendingFrames = [];  // 待渲染帧缓冲：WS 收到先堆这里，定时统一刷，避免高频重排
+
+function renderPending() {
+  if (!pendingFrames.length) return;
+  const batch = pendingFrames;
+  pendingFrames = [];
+  const list = $('msgList');
+  const ph = list.querySelector('.log-placeholder');
+  if (ph) ph.remove();
+  let html = '';
+  batch.forEach(m => { html += buildLine(m); });
+  list.insertAdjacentHTML('beforeend', html);
+  if (list.children.length > 100) {
+    const excess = list.children.length - 100;
+    for (let i = 0; i < excess; i++) list.removeChild(list.firstChild);
+  }
+  list.scrollTop = list.scrollHeight;  // 定时批量，频率低，直接滚一次
+}
+
+// 定时批量刷新：每 800ms 统一渲染一次（对标旧版 Tk after_idle 的空闲合并）
+setInterval(() => {
+  if (!browsing && !paused) {
+    renderPending();
+  } else {
+    pendingFrames = [];  // 历史浏览/暂停时不渲染，丢弃缓冲（历史在 SQLite 看）
+  }
+}, 800);
+
+function fetchPage(offset) {
+  currentOffset = offset;
+  fetch(`/api/messages?offset=${offset}&limit=${PAGE_SIZE}`)
+    .then(r => r.json())
+    .then(data => {
+      total = data.total;
+      const list = $('msgList');
+      list.innerHTML = '';
+      if (!data.messages.length) {
+        list.innerHTML = '<div class="log-placeholder">暂无报文</div>';
+      } else {
+        let html = '';
+        // 后端按 id DESC 返回（最新在前），反转成正序（最新在底部），与实时流一致
+        for (let i = data.messages.length - 1; i >= 0; i--) {
+          html += buildLine(data.messages[i]);
+        }
+        list.insertAdjacentHTML('beforeend', html);
+      }
+      updatePager();
+    });
+}
+
+function updatePager() {
+  const startIdx = total === 0 ? 0 : Math.max(1, total - currentOffset - PAGE_SIZE + 1);
+  const endIdx = Math.max(0, total - currentOffset);
+  const p = total === 0 ? 1 : Math.floor(currentOffset / PAGE_SIZE) + 1;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  $('pageInfo').textContent = `${startIdx}-${endIdx} / 共${total} (${p}/${totalPages})`;
+  $('btnFirst').disabled = currentOffset === 0;
+  $('btnPrev').disabled = currentOffset === 0;
+  $('btnNext').disabled = currentOffset + PAGE_SIZE >= total;
+  $('btnLast').disabled = currentOffset >= Math.max(0, total - PAGE_SIZE);
+}
+
+function backToRealtime() {
+  browsing = false;
+  currentOffset = 0;
+  pendingFrames = [];
+  const list = $('msgList');
+  list.innerHTML = '<div class="log-placeholder">等待报文...</div>';
+  updatePager();
+}
+
+function goPage(dir) {
+  if (dir === 'first') {
+    backToRealtime();  // 首页 = 回实时流（清空 + 从当前时刻重新 append）
+    return;
+  }
+  browsing = true;  // 进历史浏览态
+  if (dir === 'prev') currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
+  else if (dir === 'next') currentOffset = Math.min(Math.max(0, total - PAGE_SIZE), currentOffset + PAGE_SIZE);
+  else if (dir === 'last') currentOffset = Math.max(0, total - PAGE_SIZE);
+  fetchPage(currentOffset);
+}
+
+// ── WebSocket ──
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  wsMsg = new WebSocket(`${proto}://${location.host}/ws/messages`);
+  wsMsg.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'frames') {
+      // 计数实时更新（轻量单节点，不触发重排）
+      ev.batch.forEach(m => {
+        if (m.direction === 'tx') $('txCount').textContent = Number($('txCount').textContent) + 1;
+        else $('rxCount').textContent = Number($('rxCount').textContent) + 1;
+      });
+      total += ev.batch.length;
+      updatePager();
+      // 帧进入待渲染缓冲，由定时器统一刷（避免每 300ms 强制重排）
+      if (!browsing && !paused) {
+        pendingFrames.push(...ev.batch);
+        if (pendingFrames.length > 500) pendingFrames.splice(0, pendingFrames.length - 500);
+      }
+    }
+  };
+  wsState = new WebSocket(`${proto}://${location.host}/ws/state`);
+  wsState.onmessage = e => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'state_changed') {
+      $('stateText').textContent = ev.data.state;
+      if (ev.data.state === '充电完成' || ev.data.state === '已停止' || ev.data.state === '错误状态') {
+        $('btnStart').disabled = false;
+        $('btnStop').disabled = true;
+      }
+    } else if (ev.type === 'error') {
+      $('errText').textContent = '⚠ ' + ev.data.message;
+    } else if (ev.type === 'can_connected') {
+      updateCanUI(true);
+    } else if (ev.type === 'can_disconnected') {
+      updateCanUI(false);
+    } else if (ev.type === 'can_connect_failed') {
+      updateCanUI(false);
+      if (ev.data.last_error) $('errText').textContent = '⚠ ' + ev.data.last_error;
+    }
+  };
+}
+
+function updateCanUI(on) {
+  $('canDot').className = 'conn-dot ' + (on ? 'online' : '');
+  $('canState').textContent = on ? '已连接' : '未连接';
+  $('canState').className = 'conn-status ' + (on ? 'online' : '');
+  $('btnConnect').disabled = on;
+  $('btnDisconnect').disabled = !on;
+}
+
+// ── BMS 参数表单：报文 Tab + 字段 ──
+let currentMode = 'gb';
+
+async function loadProtocol() {
+  const data = await (await fetch('/api/protocol')).json();
+  const abbrs = Object.keys(data);
+
+  // 报文 Tab（横向，放不下自动换行）
+  const tabs = $('msgTabs');
+  tabs.innerHTML = '';
+  abbrs.forEach(abbr => {
+    const btn = document.createElement('button');
+    btn.className = 'msg-tab';
+    btn.textContent = abbr;
+    btn.onclick = () => selectMessage(abbr);
+    tabs.appendChild(btn);
+  });
+
+  // 每个报文的字段面板（默认隐藏）
+  const container = $('msgFields');
+  container.innerHTML = '';
+  abbrs.forEach(abbr => {
+    const def = data[abbr];
+    const panel = document.createElement('div');
+    panel.className = 'msg-fields-panel';
+    panel.id = 'panel-' + abbr;
+    panel.style.display = 'none';
+    const title = document.createElement('div');
+    title.className = 'panel-title';
+    title.textContent = `${abbr} — ${def.name}`;
+    panel.appendChild(title);
+    // 发送周期
+    panel.appendChild(makeRow(abbr, '__cycle_ms__', '发送周期', def.cycle_ms, 'ms', null, 'int_le'));
+    // 数据域字段
+    for (const f of def.fields) {
+      panel.appendChild(makeRow(abbr, f.name, f.name, f.default, f.unit, f.enum, f.data_type));
+    }
+    container.appendChild(panel);
+  });
+
+  if (abbrs.length) selectMessage(abbrs[0]);
+
+  // FAST 模式：BRM 加 FAST 标识填充下拉
+  if (currentMode === 'fast') addFastFillDropdown();
+}
+
+function addFastFillDropdown() {
+  const panel = $('panel-BRM');
+  if (!panel) return;
+  const row = document.createElement('div');
+  row.className = 'config-row';
+  const label = document.createElement('label');
+  label.textContent = 'FAST 标识填充';
+  row.appendChild(label);
+  const sel = document.createElement('select');
+  sel.id = 'fastFillSel';
+  const opts = [
+    {value: 'none', text: '无特殊填充'},
+    {value: 'fast', text: '填充FAST'},
+    {value: 'ee', text: '填充EE'},
+    {value: 'fast_ee', text: '填充FAST和EE'},
+  ];
+  opts.forEach(o => {
+    const opt = document.createElement('option');
+    opt.value = o.value; opt.textContent = o.text;
+    if (o.value === 'fast') opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.onchange = async () => {
+    await fetch('/api/mode', { method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({mode: 'fast', fill_mode: sel.value}) });
+  };
+  row.appendChild(sel);
+  panel.appendChild(row);
+}
+
+function makeRow(abbr, fieldKey, label, defaultValue, unit, enumMap, dataType) {
+  const row = document.createElement('div');
+  row.className = 'config-row';
+  const lab = document.createElement('label');
+  lab.textContent = label;
+  row.appendChild(lab);
+  if (enumMap) {
+    const sel = document.createElement('select');
+    sel.dataset.abbr = abbr;
+    sel.dataset.field = fieldKey;
+    for (const [k, v] of Object.entries(enumMap)) {
+      const opt = document.createElement('option');
+      opt.value = v; opt.textContent = v;
+      if (defaultValue !== null && defaultValue !== undefined && String(defaultValue) === v) {
+        opt.selected = true;
+      }
+      sel.appendChild(opt);
+    }
+    row.appendChild(sel);
+  } else {
+    const inp = document.createElement('input');
+    if (dataType === 'ascii') {
+      inp.type = 'text';
+    } else {
+      inp.type = 'number'; inp.step = 'any';
+    }
+    inp.dataset.abbr = abbr;
+    inp.dataset.field = fieldKey;
+    if (defaultValue !== null && defaultValue !== undefined) inp.value = defaultValue;
+    row.appendChild(inp);
+  }
+  if (unit) {
+    const u = document.createElement('span');
+    u.className = 'unit';
+    u.textContent = unit;
+    row.appendChild(u);
+  }
+  return row;
+}
+
+function selectMessage(abbr) {
+  document.querySelectorAll('.msg-tab').forEach(t => t.classList.toggle('active', t.textContent === abbr));
+  document.querySelectorAll('.msg-fields-panel').forEach(p => p.style.display = (p.id === 'panel-' + abbr) ? '' : 'none');
+}
+
+function collectParams() {
+  const params = {};
+  document.querySelectorAll('#msgFields [data-abbr]').forEach(el => {
+    const abbr = el.dataset.abbr;
+    const field = el.dataset.field;
+    if (el.tagName === 'SELECT') {
+      if (!params[abbr]) params[abbr] = {};
+      params[abbr][field] = el.value;
+    } else if (el.value !== '') {
+      if (!params[abbr]) params[abbr] = {};
+      params[abbr][field] = el.type === 'number' ? parseFloat(el.value) : el.value;
+    }
+  });
+  return params;
+}
+
+// ── 事件绑定 ──
+$('btnConnect').onclick = async () => {
+  $('errText').textContent = '';
+  $('canDot').className = 'conn-dot connecting';
+  $('canState').textContent = '连接中…';
+  const body = {
+    device_type: $('devType').value,
+    channel: Number($('channel').value),
+    baudrate: Number($('baudrate').value),
+  };
+  const resp = await fetch('/api/can/connect', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  const data = await resp.json();
+  updateCanUI(data.connected);
+  $('txCount').textContent = data.status.tx_count;
+  $('rxCount').textContent = data.status.rx_count;
+  if (!data.connected && data.status.last_error) {
+    $('errText').textContent = '⚠ ' + data.status.last_error;
+  }
+};
+
+$('btnDisconnect').onclick = async () => {
+  await fetch('/api/can/disconnect', { method: 'POST' });
+  updateCanUI(false);
+};
+
+$('btnStart').onclick = async () => {
+  $('errText').textContent = '';
+  const resp = await fetch('/api/start', { method: 'POST' });
+  const data = await resp.json();
+  if (!data.ok) {
+    $('errText').textContent = '⚠ ' + (data.error || '启动失败');
+    return;
+  }
+  $('btnStart').disabled = true;
+  $('btnStop').disabled = false;
+};
+
+$('btnStop').onclick = async () => {
+  await fetch('/api/stop', { method: 'POST' });
+  $('btnStart').disabled = false;
+  $('btnStop').disabled = true;
+};
+
+$('btnApply').onclick = async () => {
+  const params = collectParams();
+  await fetch('/api/params', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({params}) });
+  $('applyHint').textContent = '✓ 参数已提交';
+  clearTimeout(window._applyHintTimer);
+  window._applyHintTimer = setTimeout(() => { $('applyHint').textContent = ''; }, 2000);
+};
+
+$('modeSel').onchange = async () => {
+  currentMode = $('modeSel').value;
+  await fetch('/api/mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mode: currentMode}) });
+  await loadProtocol();  // 模式变了，重新拉协议（自适应模式会多 BFC Tab）
+};
+
+$('chkPause').onchange = () => {
+  paused = $('chkPause').checked;
+  if (!paused) {
+    backToRealtime();  // 取消暂停：回实时流
+  }
+};
+
+$('btnFirst').onclick = () => goPage('first');
+$('btnPrev').onclick = () => goPage('prev');
+$('btnNext').onclick = () => goPage('next');
+$('btnLast').onclick = () => goPage('last');
+$('pageSize').onchange = () => { PAGE_SIZE = parseInt($('pageSize').value); browsing = true; fetchPage(0); };
+
+$('btnExport').onclick = () => {
+  window.location.href = '/api/messages/export';
+};
+
+$('btnClear').onclick = async () => {
+  await fetch('/api/messages/clear', { method: 'POST' });
+  total = 0;
+  currentOffset = 0;
+  browsing = false;
+  pendingFrames = [];
+  $('msgList').innerHTML = '<div class="log-placeholder">暂无报文</div>';
+  $('txCount').textContent = '0';
+  $('rxCount').textContent = '0';
+  updatePager();
+};
+
+// ── 初始化 ──
+(async function init() {
+  connectWS();
+  await loadProtocol();
+  const s = await (await fetch('/api/can/status')).json();
+  updateCanUI(s.connected);
+  $('txCount').textContent = s.tx_count;
+  $('rxCount').textContent = s.rx_count;
+  const st = await (await fetch('/api/status')).json();
+  $('stateText').textContent = st.state;
+})();
+</script>
+</body>
+</html>

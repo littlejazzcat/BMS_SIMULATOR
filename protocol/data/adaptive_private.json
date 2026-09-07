@@ -1,0 +1,71 @@
+{
+  "meta": {
+    "protocol_name": "自适应大电流私有协议 (CFC/BFC)",
+    "protocol_id": "adaptive_private_v1.0",
+    "version": "V1.0",
+    "baud_rate": 250000,
+    "frame_format": "CAN_2.0B_EXTENDED"
+  },
+  "can_id_schema": {
+    "total_bits": 29,
+    "fields": [
+      {"name": "priority", "bit_start": 26, "bit_len": 3, "description": "优先权"},
+      {"name": "edp", "bit_start": 25, "bit_len": 1, "fixed_value": 0},
+      {"name": "dp", "bit_start": 24, "bit_len": 1, "fixed_value": 0},
+      {"name": "pf", "bit_start": 16, "bit_len": 8, "description": "PDU格式"},
+      {"name": "ps", "bit_start": 8, "bit_len": 8, "description": "目标地址"},
+      {"name": "sa", "bit_start": 0, "bit_len": 8, "description": "源地址"}
+    ],
+    "message_identifier": "pf",
+    "identifier_field": "pf"
+  },
+  "addresses": {
+    "SECC": {"value": 86, "hex": "0x56", "name": "充电机"},
+    "EVCC": {"value": 244, "hex": "0xF4", "name": "车辆"}
+  },
+  "encoding_rules": {
+    "default_byte_order": "little_endian",
+    "undefined_bit_fill": 1
+  },
+  "message_matcher": {
+    "type": "pf_based",
+    "match_field": "pf"
+  },
+  "message_groups": [],
+  "messages": [
+    {
+      "name": "充电机自适应偏移报文",
+      "abbr": "CFC",
+      "identifier": {"pf": 48},
+      "can_id_template": {"priority": 6, "pf": 48, "ps": 244, "sa": 86},
+      "direction": "充电机→车辆",
+      "cycle_ms": 250,
+      "data_length": 8,
+      "stage": "自适应",
+      "fields": [
+        {"name": "电流偏移量", "byte_start": 1, "length": 1, "data_type": "int_le", "description": "100A/bit, 范围 4~20, 负值(6=-600A)", "required": true},
+        {"name": "充电枪数量", "byte_start": 2, "length": 1, "bit_start": 0, "bit_len": 4, "data_type": "bits", "description": "充电机检测到的有效插枪数量", "required": true},
+        {"name": "应答信号", "byte_start": 2, "length": 1, "bit_start": 4, "bit_len": 2, "data_type": "bits", "enum": {"0": "偏移量自动识别通知", "1": "信息不符", "2": "无效", "3": "信息一致"}, "required": true},
+        {"name": "保留位", "byte_start": 2, "length": 1, "bit_start": 6, "bit_len": 2, "data_type": "bits", "editable": false, "default_value": 3},
+        {"name": "保留字节", "byte_start": 3, "length": 6, "data_type": "int_le", "editable": false, "default_value": 281474976710655}
+      ]
+    },
+    {
+      "name": "BMS自适应偏移报文",
+      "abbr": "BFC",
+      "identifier": {"pf": 49},
+      "can_id_template": {"priority": 6, "pf": 49, "ps": 86, "sa": 244},
+      "direction": "车辆→充电机",
+      "cycle_ms": 250,
+      "data_length": 8,
+      "stage": "自适应",
+      "fields": [
+        {"name": "电流偏移量", "byte_start": 1, "length": 1, "data_type": "int_le", "description": "回传 CFC 的偏移值", "required": true},
+        {"name": "充电枪数量", "byte_start": 2, "length": 1, "bit_start": 0, "bit_len": 4, "data_type": "bits", "description": "BMS 检测到的有效插枪数量", "required": true},
+        {"name": "应答信号", "byte_start": 2, "length": 1, "bit_start": 4, "bit_len": 2, "data_type": "bits", "enum": {"0": "未收到CFC", "1": "枪数量不一致", "2": "无效", "3": "枪数量一致"}, "required": true},
+        {"name": "保留位", "byte_start": 2, "length": 1, "bit_start": 6, "bit_len": 2, "data_type": "bits", "editable": false, "default_value": 3},
+        {"name": "保留字节", "byte_start": 3, "length": 6, "data_type": "int_le", "editable": false, "default_value": 281474976710655}
+      ]
+    }
+  ]
+}
