@@ -182,17 +182,26 @@ class ChargingController:
         msg = self.codec.identify_message(frame.can_id, frame.data)
 
         # CFC 处理（自适应模式）
-        if self.private_protocol and frame.can_id == self._can_ids.get("CFC"):
+        is_cfc = bool(self.private_protocol) and frame.can_id == self._can_ids.get("CFC")
+        if is_cfc:
             self.mode.on_cfc(self, frame.data)
         # CRM 处理（FAST 模式检查标识）
         elif msg is not None and msg.abbr == "CRM":
             self.mode.on_crm(self, frame.data)
 
+        # 解析数据域（多帧不解析）
+        if is_cfc:
+            cfc_msg = self.private_protocol.get_message_by_abbr("CFC")
+            parsed = self._parse_fields(self.private_codec, cfc_msg, frame.data)
+        else:
+            parsed = self._parse_fields(self.codec, msg, frame.data)
+
         self._emit("frame_rx", {
             "can_id": frame.can_id,
             "data_hex": frame.data.hex(" ").upper(),
-            "abbr": msg.abbr if msg else None,
+            "abbr": "CFC" if is_cfc else (msg.abbr if msg else None),
             "ts": frame.timestamp if frame.timestamp > 0 else time.time(),
+            "parsed": parsed,
         })
 
     def submit_command(self, cmd: dict):
@@ -297,9 +306,12 @@ class ChargingController:
             self._send("BRM", self.params["BRM"])
             self._first_sent["BRM"] = time.time()
             return
-        if self._got_first("CRM", 0xAA):
+        # 收到 CRM=AA（标准/国标）或 CRM=EE（FAST 大电流确认）→ 停发 BRM，转 BCP
+        if self._got_first("CRM", 0xAA) or self._got_first("CRM", 0xEE):
             self._transition(ChargingState.SENDING_BCP)
             return
+        if self._should_send("BRM"):  # 按设定周期（250ms）重发 BRM
+            self._send("BRM", self.params["BRM"])
         if time.time() - self._first_sent["BRM"] > self.TIMEOUTS["wait_crm_aa"]:
             self._enter_error("等待CRM=AA超时")
 
@@ -441,23 +453,32 @@ class ChargingController:
             r["data_hex"] = bytes(data).hex(" ").upper()
             r["tp_frames"] = self.codec.tp_split(msg, bytes(data), r["can_id"])
 
-        frames = []
         if r.get("tp") and r.get("tp_frames"):
+            # TP 分帧：每帧单独发送 + 单独 emit，前端/导出按分帧显示
             for fr in r["tp_frames"]:
                 if "CTS" in fr.get("type", ""):
                     continue  # CTS 是接收方（充电机）回的流控帧，BMS 不发
-                frames.append(CanFrame(can_id=fr["can_id"], data=fr["data"], direction="tx"))
+                frame = CanFrame(can_id=fr["can_id"], data=fr["data"], direction="tx")
+                self.transport.send(frame)
+                self._emit("frame_tx", {
+                    "abbr": msg_abbr,
+                    "can_id": frame.can_id,
+                    "data_hex": frame.data.hex(" ").upper(),
+                    "tp": True,
+                    "ts": time.time(),
+                    "parsed": None,  # TP 分片不解析
+                })
         else:
-            frames.append(CanFrame(can_id=r["can_id"], data=r["data"], direction="tx"))
-        for frame in frames:
+            frame = CanFrame(can_id=r["can_id"], data=r["data"], direction="tx")
             self.transport.send(frame)
-        self._emit("frame_tx", {
-            "abbr": msg_abbr,
-            "can_id": r["can_id"],
-            "data_hex": r["data_hex"],
-            "tp": bool(r.get("tp")),
-            "ts": time.time(),
-        })
+            self._emit("frame_tx", {
+                "abbr": msg_abbr,
+                "can_id": r["can_id"],
+                "data_hex": r["data_hex"],
+                "tp": False,
+                "ts": time.time(),
+                "parsed": self._parse_fields(self.codec, msg, r["data"]),
+            })
 
     def _send_bfc(self):
         """自适应模式：周期发送 BFC 报文"""
@@ -487,7 +508,32 @@ class ChargingController:
             "data_hex": r["data_hex"],
             "tp": False,
             "ts": time.time(),
+            "parsed": self._parse_fields(self.private_codec, bfc_msg, r["data"]),
         })
+
+    @staticmethod
+    def _parse_fields(codec, msg, data):
+        """解析单帧报文数据域 → [{name, value}]。多帧或无 msg 返回 None。"""
+        if msg is None:
+            return None
+        if getattr(msg, "tp", False) or (msg.data_length or 0) > 8:
+            return None
+        try:
+            result = codec.decode(msg, data)
+        except Exception:
+            return None
+        parsed = []
+        for f in msg.fields:
+            v = result.get(f.name, "N/A")
+            if isinstance(v, dict):
+                label = v.get("label")
+                s = str(label) if label is not None else str(v.get("value"))
+            else:
+                s = str(v)
+            if f.unit and not isinstance(v, dict):
+                s = f"{s} {f.unit}"
+            parsed.append({"name": f.name, "value": s})
+        return parsed
 
     def _emit(self, event_type: str, data: dict):
         if self.event_cb:

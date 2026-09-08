@@ -17,6 +17,7 @@ from transport.mock import MockTransport
 from transport.zlg import ZlgTransport
 from core.controller import ChargingController
 from core.modes import create_mode, MODE_REGISTRY
+from core.states import ChargingState
 from server.ws import manager
 from server.schemas import CanConnectRequest, ParamsUpdateRequest, ModeRequest
 from server import storage
@@ -64,6 +65,7 @@ async def event_pump():
                     "can_id": d.get("can_id"),
                     "data_hex": d.get("data_hex"),
                     "time": time_str,
+                    "parsed": d.get("parsed"),
                 }
                 frames_batch.append(rec)
             else:
@@ -144,10 +146,10 @@ async def can_disconnect():
 
 
 @app.get("/api/messages")
-async def get_messages(offset: int = 0, limit: int = 200):
-    """分页查询报文历史（从新到旧）"""
-    messages, total = storage.query_messages(offset, limit)
-    return {"messages": messages, "total": total}
+async def get_messages(offset: int = 0, limit: int = 200, max_id: int = None):
+    """分页查询报文历史（从新到旧）。max_id 为快照锚点。"""
+    messages, total, anchor = storage.query_messages(offset, limit, max_id)
+    return {"messages": messages, "total": total, "max_id": anchor}
 
 
 @app.get("/api/messages/export")
@@ -163,7 +165,7 @@ async def export_messages():
             m["abbr"],
             f"0x{m['can_id']:08X}" if m["can_id"] is not None else "",
             m["data_hex"],
-            m["time"],
+            f'="{m["time"]}"',  # 强制文本，避免 Excel 吞掉毫秒
         ])
     csv_text = "\ufeff" + buf.getvalue()  # BOM，Excel 识别 UTF-8
     return Response(
@@ -261,6 +263,10 @@ async def get_mode():
 @app.post("/api/mode")
 async def set_mode(req: ModeRequest):
     global mode
+    # 仅"等待CHM"或"已停止"状态允许切换模式
+    if controller.is_charging and controller.current_state != ChargingState.WAITING_CHM:
+        return {"ok": False, "mode": mode.name,
+                "error": f"充电流程进行中（{controller.current_state.value}），请先停止充电再切换模式"}
     mode = create_mode(req.mode)
     if req.gun_count is not None:
         mode.gun_count = req.gun_count

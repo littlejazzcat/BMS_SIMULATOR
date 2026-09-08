@@ -88,6 +88,10 @@
   .log-abbr { font-weight: 700; color: #333; }
   .log-id { color: #888; }
   .log-hex { color: #333; }
+  .log-parse { color: #8a6d3b; font-size: 12px; margin-left: 8px; }
+  .log-line.clickable { cursor: pointer; }
+  .log-line.clickable:hover .log-abbr { text-decoration: underline; }
+  .log-line.expanded .log-parse { display: block; white-space: normal; margin-left: 20px; margin-top: 1px; }
 </style>
 </head>
 <body>
@@ -208,18 +212,31 @@ document.querySelectorAll('.nav-links a').forEach(a => {
 let paused = false;
 let currentOffset = 0;
 let PAGE_SIZE = 200;
-let total = 0;
-let browsing = false;  // true=历史浏览态（翻页看历史），false=实时流态
+let total = 0;            // 显示总数（实时态=实时累计，历史态=快照）
+let realtimeTotal = 0;    // 实时累计总数（数据库 COUNT + 新帧）
+let browsing = false;     // true=历史浏览态（翻页看历史），false=实时流态
+let snapshotMaxId = null; // 历史态分页快照锚点（进历史态时冻结）
+let pageReqSeq = 0;       // 分页请求序号（防异步乱序）
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 function buildLine(m) {
   const dir = m.direction === 'tx' ? 'TX' : 'RX';
   const abbr = m.abbr || '—';
   const id = '0x' + m.can_id.toString(16).toUpperCase().padStart(8, '0');
-  return `<div class="log-line"><span class="log-ts">${m.time}</span> ` +
+  let parseHtml = '';
+  if (m.parsed && m.parsed.length) {
+    const txt = m.parsed.map(p => escapeHtml(p.name) + '=' + escapeHtml(p.value)).join(' ');
+    parseHtml = `<span class="log-parse">${txt}</span>`;
+  }
+  const cls = 'log-line' + ((m.parsed && m.parsed.length) ? ' clickable' : '');
+  return `<div class="${cls}"><span class="log-ts">${m.time}</span> ` +
     `<span class="log-dir ${m.direction}">${dir}</span> ` +
     `<span class="log-abbr">${abbr}</span> ` +
     `<span class="log-id">${id}</span> ` +
-    `<span class="log-hex">${m.data_hex}</span></div>`;
+    `<span class="log-hex">${m.data_hex}</span>` + parseHtml + `</div>`;
 }
 
 let pendingFrames = [];  // 待渲染帧缓冲：WS 收到先堆这里，定时统一刷，避免高频重排
@@ -250,11 +267,26 @@ setInterval(() => {
   }
 }, 800);
 
+async function ensureSnapshot() {
+  // 首次进历史态：锚定快照（拿当前最大 id 作为分页锚点 + 快照总数）
+  if (snapshotMaxId !== null) return;
+  try {
+    const r = await fetch('/api/messages?offset=0&limit=1').then(x => x.json());
+    snapshotMaxId = r.max_id ?? null;
+    total = r.total;  // 锚定时刻的快照总数
+  } catch (e) {}
+}
+
 function fetchPage(offset) {
   currentOffset = offset;
-  fetch(`/api/messages?offset=${offset}&limit=${PAGE_SIZE}`)
+  const seq = ++pageReqSeq;
+  let url = `/api/messages?offset=${offset}&limit=${PAGE_SIZE}`;
+  if (snapshotMaxId !== null) url += `&max_id=${snapshotMaxId}`;
+  fetch(url)
     .then(r => r.json())
     .then(data => {
+      if (seq !== pageReqSeq) return;  // 过期响应丢弃，防乱序
+      if (snapshotMaxId === null) snapshotMaxId = data.max_id;  // 兜底冻结
       total = data.total;
       const list = $('msgList');
       list.innerHTML = '';
@@ -286,19 +318,25 @@ function updatePager() {
 
 function backToRealtime() {
   browsing = false;
+  paused = false;
+  $('chkPause').checked = false;  // 同步取消暂停复选框
   currentOffset = 0;
+  snapshotMaxId = null;  // 重置快照，下次进历史态重新锚定
+  pageReqSeq++;           // 作废在途的历史分页请求
   pendingFrames = [];
+  total = realtimeTotal;  // 恢复实时总数
   const list = $('msgList');
   list.innerHTML = '<div class="log-placeholder">等待报文...</div>';
   updatePager();
 }
 
-function goPage(dir) {
+async function goPage(dir) {
   if (dir === 'first') {
     backToRealtime();  // 首页 = 回实时流（清空 + 从当前时刻重新 append）
     return;
   }
   browsing = true;  // 进历史浏览态
+  await ensureSnapshot();  // 首次进历史态先锚定快照，避免分页窗口漂移
   if (dir === 'prev') currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
   else if (dir === 'next') currentOffset = Math.min(Math.max(0, total - PAGE_SIZE), currentOffset + PAGE_SIZE);
   else if (dir === 'last') currentOffset = Math.max(0, total - PAGE_SIZE);
@@ -317,7 +355,8 @@ function connectWS() {
         if (m.direction === 'tx') $('txCount').textContent = Number($('txCount').textContent) + 1;
         else $('rxCount').textContent = Number($('rxCount').textContent) + 1;
       });
-      total += ev.batch.length;
+      realtimeTotal += ev.batch.length;
+      if (!browsing) total = realtimeTotal;  // 实时态才更新显示总数，历史态冻结
       updatePager();
       // 帧进入待渲染缓冲，由定时器统一刷（避免每 300ms 强制重排）
       if (!browsing && !paused) {
@@ -528,6 +567,7 @@ $('btnStart').onclick = async () => {
   }
   $('btnStart').disabled = true;
   $('btnStop').disabled = false;
+  backToRealtime();  // 启动成功，回实时流
 };
 
 $('btnStop').onclick = async () => {
@@ -545,9 +585,18 @@ $('btnApply').onclick = async () => {
 };
 
 $('modeSel').onchange = async () => {
-  currentMode = $('modeSel').value;
-  await fetch('/api/mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mode: currentMode}) });
+  const newMode = $('modeSel').value;
+  const resp = await fetch('/api/mode', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({mode: newMode}) });
+  const data = await resp.json();
+  if (!data.ok) {
+    $('modeSel').value = currentMode;  // 不允许切换，恢复原值
+    $('errText').textContent = '⚠ ' + (data.error || '切换模式失败');
+    return;
+  }
+  currentMode = data.mode;
+  $('errText').textContent = '';  // 清空之前的错误提示
   await loadProtocol();  // 模式变了，重新拉协议（自适应模式会多 BFC Tab）
+  backToRealtime();  // 切模式成功，回实时流（重置浏览/暂停状态）
 };
 
 $('chkPause').onchange = () => {
@@ -561,7 +610,7 @@ $('btnFirst').onclick = () => goPage('first');
 $('btnPrev').onclick = () => goPage('prev');
 $('btnNext').onclick = () => goPage('next');
 $('btnLast').onclick = () => goPage('last');
-$('pageSize').onchange = () => { PAGE_SIZE = parseInt($('pageSize').value); browsing = true; fetchPage(0); };
+$('pageSize').onchange = async () => { PAGE_SIZE = parseInt($('pageSize').value); browsing = true; await ensureSnapshot(); fetchPage(0); };
 
 $('btnExport').onclick = () => {
   window.location.href = '/api/messages/export';
@@ -570,8 +619,11 @@ $('btnExport').onclick = () => {
 $('btnClear').onclick = async () => {
   await fetch('/api/messages/clear', { method: 'POST' });
   total = 0;
+  realtimeTotal = 0;
   currentOffset = 0;
   browsing = false;
+  snapshotMaxId = null;
+  pageReqSeq++;
   pendingFrames = [];
   $('msgList').innerHTML = '<div class="log-placeholder">暂无报文</div>';
   $('txCount').textContent = '0';
@@ -581,6 +633,14 @@ $('btnClear').onclick = async () => {
 
 // ── 初始化 ──
 (async function init() {
+  // 报文行点击展开完整解析（事件委托，同时只展开一条）
+  $('msgList').addEventListener('click', (e) => {
+    const line = e.target.closest('.log-line.clickable');
+    if (!line) return;
+    const wasExpanded = line.classList.contains('expanded');
+    document.querySelectorAll('.log-line.expanded').forEach(l => l.classList.remove('expanded'));
+    if (!wasExpanded) line.classList.add('expanded');
+  });
   connectWS();
   await loadProtocol();
   const s = await (await fetch('/api/can/status')).json();
@@ -589,6 +649,12 @@ $('btnClear').onclick = async () => {
   $('rxCount').textContent = s.rx_count;
   const st = await (await fetch('/api/status')).json();
   $('stateText').textContent = st.state;
+  // 初始化总数（数据库全量 COUNT），避免翻页时 total 从 0 跳变
+  try {
+    const m = await (await fetch('/api/messages?offset=0&limit=1')).json();
+    realtimeTotal = m.total;
+    total = m.total;
+  } catch (e) {}
 })();
 </script>
 </body>

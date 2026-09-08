@@ -56,9 +56,15 @@ class FastMode(ChargingMode):
         super().__init__()
         self.fill_mode = "fast"         # none / fast / ee / fast_ee
         self.fast_verified = False      # CRM 是否检测到 FAST 标识
+        self.fast_confirmed = False     # CRM=EE 是否确认大电流
+        self.fallback_to_gb = False     # CRM=AA 是否回退国标
 
     def get_offset(self, field_name: str):
-        return 0  # FAST 取消 -400 偏移
+        if "电流" in field_name:
+            if self.fallback_to_gb:
+                return None  # 回退国标：用 JSON 默认 -400 偏移（无符号）
+            return 0  # FAST 取消 -400 偏移（有符号编码）
+        return None  # 非电流字段用 JSON 默认值
 
     def is_signed(self) -> bool:
         return True  # 有符号编码（充电为负）
@@ -67,7 +73,12 @@ class FastMode(ChargingMode):
         # CRM 数据域 byte2~5 是否为 "FAST"（46 41 53 54）
         if len(crm_data) >= 5 and crm_data[1:5] == b'\x46\x41\x53\x54':
             self.fast_verified = True
-            return "fast_verified"
+        # CRM byte0：AA=回退国标，EE=确认大电流
+        if len(crm_data) > 0:
+            if crm_data[0] == 0xAA:
+                self.fallback_to_gb = True
+            elif crm_data[0] == 0xEE:
+                self.fast_confirmed = True
         return None
 
     def post_encode_brm(self, data: bytearray) -> bytearray:
@@ -91,7 +102,9 @@ class AdaptiveMode(ChargingMode):
         self.charger_gun_count = None
 
     def get_offset(self, field_name: str):
-        return self.current_offset  # CFC 下发的偏移量
+        if "电流" in field_name:
+            return self.current_offset  # CFC 下发的电流偏移量
+        return None  # 非电流字段用 JSON 默认值
 
     def on_cfc(self, controller, cfc_data: bytes):
         # CFC: byte1=电流偏移值(正值, 100A/bit), byte2 低4位=充电机枪数量
