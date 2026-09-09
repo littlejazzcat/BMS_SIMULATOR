@@ -14,6 +14,7 @@ from core.modes import ChargingMode, GbMode, AdaptiveMode
 from protocol.models.loader import load_protocol
 from protocol.services.can_codec import CanCodec as ProtocolCodec
 from transport.base import CanFrame
+from paths import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class ChargingController:
         self.private_protocol = None
         self.private_codec = None
         try:
-            self.private_protocol = load_protocol("protocol/data/adaptive_private.json")
+            self.private_protocol = load_protocol(resource_path("protocol/data/adaptive_private.json"))
             self.private_codec = ProtocolCodec(self.private_protocol)
             for m in self.private_protocol.messages:
                 self._can_ids[m.abbr] = self.private_codec.make_can_id(m)
@@ -243,6 +244,10 @@ class ChargingController:
         if action == "update_params":
             for abbr, fields in cmd.get("params", {}).items():
                 key = abbr.upper()
+                # BFC 枪数量 → mode.gun_count（自适应模式）
+                if key == "BFC" and "充电枪数量" in fields:
+                    self.mode.gun_count = int(fields["充电枪数量"])
+                    continue
                 if key not in self.params:
                     continue
                 cycle = fields.get("__cycle_ms__")

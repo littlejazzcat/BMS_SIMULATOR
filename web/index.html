@@ -27,7 +27,7 @@
   .conn-status.online { color: #34a853; background: #e8f5e9; }
   .conn-label { font-size: 12px; color: #999; }
   .conn-divider { width: 1px; height: 24px; background: #e0e0e0; }
-  .state-text { font-size: 14px; font-weight: 600; color: #1a73e8; }
+  .state-text { font-size: 14px; font-weight: 600; color: #1a73e8; min-width: 92px; }
   .counters { font-size: 12px; color: #666; margin-left: auto; }
   .counters b { font-family: 'Consolas', monospace; }
   .err-text { font-size: 12px; color: #ea4335; }
@@ -180,6 +180,8 @@
         <option value="100">100</option>
         <option value="200" selected>200</option>
         <option value="500">500</option>
+        <option value="1000">1000</option>
+        <option value="5000">5000</option>
       </select>
       <span style="flex:1"></span>
       <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:4px">
@@ -209,7 +211,19 @@ document.querySelectorAll('.nav-links a').forEach(a => {
 });
 
 // ── 报文流（批量渲染 + 历史分页）──
-let paused = false;
+let _paused = false;
+// paused 用 getter/setter：任何地方赋值 paused 都自动同步「暂停滚动」复选框
+Object.defineProperty(window, 'paused', {
+  get() { return _paused; },
+  set(v) {
+    _paused = !!v;
+    const chk = document.getElementById('chkPause');
+    if (chk && chk.checked !== _paused) {
+      chk.checked = _paused;  // 仅值变化时赋值，避免冗余赋值触发 change 事件
+    }
+  },
+  configurable: true,
+});
 let currentOffset = 0;
 let PAGE_SIZE = 200;
 let total = 0;            // 显示总数（实时态=实时累计，历史态=快照）
@@ -318,8 +332,7 @@ function updatePager() {
 
 function backToRealtime() {
   browsing = false;
-  paused = false;
-  $('chkPause').checked = false;  // 同步取消暂停复选框
+  paused = false;  // setter 自动取消暂停复选框
   currentOffset = 0;
   snapshotMaxId = null;  // 重置快照，下次进历史态重新锚定
   pageReqSeq++;           // 作废在途的历史分页请求
@@ -593,7 +606,7 @@ $('modeSel').onchange = async () => {
     $('errText').textContent = '⚠ ' + (data.error || '切换模式失败');
     return;
   }
-  currentMode = data.mode;
+  currentMode = newMode;  // 用小写 key（与 modeSel.value 一致），不要用后端大写 mode.name
   $('errText').textContent = '';  // 清空之前的错误提示
   await loadProtocol();  // 模式变了，重新拉协议（自适应模式会多 BFC Tab）
   backToRealtime();  // 切模式成功，回实时流（重置浏览/暂停状态）

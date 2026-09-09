@@ -7,7 +7,9 @@ import json
 import sqlite3
 import threading
 
-DB_PATH = "bms_messages.db"
+from paths import data_path
+
+DB_PATH = data_path("bms_messages.db")
 MAX_ROWS = 50000            # 最多保留 5 万条，超出删最旧
 CLEANUP_INTERVAL = 5000     # 每插入 5000 条清理一次
 

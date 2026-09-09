@@ -21,6 +21,7 @@ from core.states import ChargingState
 from server.ws import manager
 from server.schemas import CanConnectRequest, ParamsUpdateRequest, ModeRequest
 from server import storage
+from paths import resource_path
 
 # ── 全局装配对象（lifespan 里初始化） ──────────────
 protocol = None
@@ -35,7 +36,7 @@ mode = None
 # 事件队列：controller 线程 → asyncio 广播
 event_queue: "queue.Queue[dict]" = queue.Queue()
 
-PROTOCOL_PATH = "protocol/data/gbt27930_v1.1.json"
+PROTOCOL_PATH = resource_path("protocol/data/gbt27930_v1.1.json")
 
 
 def event_cb(event_type: str, data: dict):
@@ -81,7 +82,7 @@ async def lifespan(app: FastAPI):
     protocol = load_protocol(PROTOCOL_PATH)
     codec = CanCodec(protocol)
     try:
-        private_protocol = load_protocol("protocol/data/adaptive_private.json")
+        private_protocol = load_protocol(resource_path("protocol/data/adaptive_private.json"))
     except Exception:
         private_protocol = None
     transport_mock = MockTransport(codec, charging_duration=8.0)
@@ -299,4 +300,4 @@ async def ws_state(ws: WebSocket):
 
 
 # 静态文件 + 首页（必须放最后，否则会拦截 /api 和 /ws 路由）
-app.mount("/", StaticFiles(directory="web", html=True), name="static")
+app.mount("/", StaticFiles(directory=resource_path("web"), html=True), name="static")
