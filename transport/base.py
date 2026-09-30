@@ -38,6 +38,9 @@ class CanTransport(ABC):
     def register_callback(self, cb: Callable[[CanFrame], None]) -> None:
         """注册接收回调（收到帧时调用）"""
 
+    def register_disconnect_callback(self, cb: Callable[[], None]) -> None:
+        """注册断开回调（设备掉线时调用）。默认空实现，真实 CAN 传输可覆盖。"""
+
     @abstractmethod
     def get_status(self) -> dict:
         """查询连接状态 + 设备信息 + 收发计数"""

@@ -52,12 +52,12 @@ class ChargingController:
         "BRO_AA": {"车辆充电准备好": "准备好(0xAA)"},
         "BCL": {
             "车辆接口充电电压需求": 400.0,
-            "车辆接口充电电流需求": -180.0,
+            "车辆接口充电电流需求": 180.0,
             "充电模式": "恒流充电",
         },
         "BCS": {
             "车辆接口当前电压测量值": 400.0,
-            "车辆接口当前电流测量值": -180.0,
+            "车辆接口当前电流测量值": 180.0,
             "最高单体蓄电池电压及其组号": (420 << 4) | 1,  # 4.2V + 组号1
             "当前荷电状态SOC": 50.0,
             "估算剩余充电时间": 30.0,
@@ -118,6 +118,7 @@ class ChargingController:
         self.is_charging = False
         self._stop_requested = False
         self._error_msg = ""
+        self.auto_start = False  # 空闲态检测到 CHM 自动启动充电
 
         self._thread = None
         self._lock = threading.Lock()
@@ -168,7 +169,8 @@ class ChargingController:
         self._state_start = time.time()
         self._first_sent = {}
         self._received = {}
-        self._emit("state_changed", {"state": self.current_state.value})
+        logger.info("启动充电流程，等待 CHM")
+        self._emit("state_changed", {"state": self.current_state.value, "is_charging": True})
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -182,6 +184,11 @@ class ChargingController:
             self._received[frame.can_id] = frame.data
         msg = self.codec.identify_message(frame.can_id, frame.data)
 
+        # 自动启动：空闲态检测到 CHM 自动开始充电
+        if self.auto_start and not self.is_charging and msg is not None and msg.abbr == "CHM":
+            self.start()
+            with self._lock:
+                self._received[frame.can_id] = frame.data  # start() 清空了 _received，重新记录本帧 CHM
         # CFC 处理（自适应模式）
         is_cfc = bool(self.private_protocol) and frame.can_id == self._can_ids.get("CFC")
         if is_cfc:
@@ -229,7 +236,7 @@ class ChargingController:
             except Exception as e:
                 logger.error("状态机异常: %s", e)
             time.sleep(0.005)  # 5ms 轮询
-        self._emit("state_changed", {"state": "已停止"})
+        self._emit("state_changed", {"state": "已停止", "is_charging": False})
 
     def _drain_commands(self):
         while True:
@@ -261,6 +268,10 @@ class ChargingController:
 
     def _dispatch(self):
         st = self.current_state
+        # 收到充电机错误报文 CEM：中止当前流程，进入错误处理（发 BEM）
+        if st not in (ChargingState.ERROR, ChargingState.COMPLETED) and self._got("CEM"):
+            self._enter_error("收到充电机错误报文(CEM)")
+            return
         if st == ChargingState.WAITING_CHM:
             self._state_waiting_chm()
         elif st == ChargingState.SENDING_BHM:
@@ -425,10 +436,12 @@ class ChargingController:
     def _transition(self, new_state: ChargingState):
         self.current_state = new_state
         self._state_start = time.time()
-        self._emit("state_changed", {"state": new_state.value})
+        logger.info("状态切换 → %s", new_state.value)
+        self._emit("state_changed", {"state": new_state.value, "is_charging": self.is_charging})
 
     def _enter_error(self, msg: str):
         self._error_msg = msg
+        logger.error("进入错误状态: %s", msg)
         self._emit("error", {"message": msg})
         self._transition(ChargingState.ERROR)
 
@@ -440,13 +453,15 @@ class ChargingController:
             logger.error("未找到报文: %s", msg_abbr)
             return
 
-        # 电流字段 offset 覆盖 + 有符号编码（按模式）
-        field_overrides = {}
+        # 电流字段：前端只填正值，后端按「充电电流为负」取负
+        params = dict(params)
         for f in msg.fields:
-            if f.offset is not None:
-                offset = self.mode.get_offset(f.name)
-                if offset is not None:
-                    field_overrides[f.name] = {"offset": offset, "signed": self.mode.is_signed()}
+            v = params.get(f.name)
+            if "电流" in f.name and isinstance(v, (int, float)):
+                params[f.name] = -abs(v)
+
+        # 电流字段 offset 覆盖 + 有符号编码（按模式）
+        field_overrides = self._field_overrides(msg)
 
         r = self.codec.encode(msg, params, field_overrides)
 
@@ -473,6 +488,16 @@ class ChargingController:
                     "ts": time.time(),
                     "parsed": None,  # TP 分片不解析
                 })
+            # 额外 emit 一条「完整报文」，带重组后的数据与字段解析
+            self._emit("frame_tx", {
+                "abbr": msg_abbr,
+                "can_id": r["can_id"],
+                "data_hex": r["data_hex"],
+                "tp": True,
+                "tp_complete": True,
+                "ts": time.time(),
+                "parsed": self._parse_fields(self.codec, msg, r["data"]),
+            })
         else:
             frame = CanFrame(can_id=r["can_id"], data=r["data"], direction="tx")
             self.transport.send(frame)
@@ -516,15 +541,26 @@ class ChargingController:
             "parsed": self._parse_fields(self.private_codec, bfc_msg, r["data"]),
         })
 
-    @staticmethod
-    def _parse_fields(codec, msg, data):
-        """解析单帧报文数据域 → [{name, value}]。多帧或无 msg 返回 None。"""
+    def _field_overrides(self, msg):
+        """按当前模式生成字段 offset/signed 覆盖（编码与解析共用）"""
+        overrides = {}
+        for f in msg.fields:
+            if f.offset is not None:
+                offset = self.mode.get_offset(f.name)
+                if offset is not None:
+                    overrides[f.name] = {"offset": offset, "signed": self.mode.is_signed()}
+        return overrides
+
+    def _parse_fields(self, codec, msg, data):
+        """解析报文数据域 → [{name, value}]。msg 为空返回 None。
+
+        单帧（≤8字节）与 TP 完整数据（重组后）都可解析，调用方负责传入完整数据。
+        解析按当前模式套用相同的 offset / signed 覆盖（与发送编码对称）。
+        """
         if msg is None:
             return None
-        if getattr(msg, "tp", False) or (msg.data_length or 0) > 8:
-            return None
         try:
-            result = codec.decode(msg, data)
+            result = codec.decode(msg, data, self._field_overrides(msg))
         except Exception:
             return None
         parsed = []

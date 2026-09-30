@@ -21,6 +21,10 @@ class ModeRequest(BaseModel):
     fill_mode: Optional[str] = None
 
 
+class AutoStartRequest(BaseModel):
+    enabled: bool
+
+
 class StatusResponse(BaseModel):
     state: str
     mode: str

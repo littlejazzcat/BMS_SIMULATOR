@@ -122,8 +122,9 @@ def query_all_messages():
         return []
     with _lock:
         cur = _conn.cursor()
-        cur.execute("SELECT direction, abbr, can_id, data_hex, time FROM messages ORDER BY id ASC")
-        rows = [{"direction": r[0], "abbr": r[1], "can_id": r[2], "data_hex": r[3], "time": r[4]} for r in cur.fetchall()]
+        cur.execute("SELECT direction, abbr, can_id, data_hex, time, parsed FROM messages ORDER BY id ASC")
+        rows = [{"direction": r[0], "abbr": r[1], "can_id": r[2], "data_hex": r[3], "time": r[4],
+                 "parsed": json.loads(r[5]) if r[5] else None} for r in cur.fetchall()]
     return rows
 
 
@@ -134,7 +135,9 @@ def clear_messages():
     with _lock:
         _conn.execute("DELETE FROM messages")
         _conn.commit()
+        # VACUUM 回收空闲页；WAL 模式下需再 checkpoint 才真正缩主库文件
         try:
+            _conn.execute("VACUUM")
             _conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.OperationalError:
             pass

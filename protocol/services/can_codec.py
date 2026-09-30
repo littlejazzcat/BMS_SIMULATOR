@@ -15,18 +15,23 @@ class CanCodec:
 
     # ── 解码 ──────────────────────────────────────
 
-    def decode(self, msg: MessageDef, data: bytes) -> Dict[str, Any]:
-        """解码数据域 → 物理量字典"""
+    def decode(self, msg: MessageDef, data: bytes, field_overrides: Dict = None) -> Dict[str, Any]:
+        """解码数据域 → 物理量字典
+
+        field_overrides: {"字段名": {"offset": 新偏移量, "signed": True}}
+        覆盖 JSON 的 offset / 启用有符号解码（与 encode 对称）。
+        """
+        field_overrides = field_overrides or {}
         result = {}
         for field in msg.fields:
             try:
-                value = self._unpack_field(field, data)
+                value = self._unpack_field(field, data, field_overrides.get(field.name))
                 result[field.name] = value
             except Exception as e:
                 result[field.name] = f"[解码失败: {e}]"
         return result
 
-    def _unpack_field(self, field: FieldDef, data: bytes) -> Any:
+    def _unpack_field(self, field: FieldDef, data: bytes, override: Dict = None) -> Any:
         """根据 data_type 分派解包"""
         if field.data_type == "bits":
             return self._unpack_bits(field, data)
@@ -37,29 +42,35 @@ class CanCodec:
         elif field.data_type == "float_ieee754":
             return self._unpack_float(field, data)
         elif field.data_type == "int_be":
-            return self._unpack_int_be(field, data)
+            return self._unpack_int_be(field, data, override)
         else:  # int_le (default)
-            return self._unpack_int_le(field, data)
+            return self._unpack_int_le(field, data, override)
 
-    def _unpack_int_le(self, field: FieldDef, data: bytes) -> Any:
+    def _unpack_int_le(self, field: FieldDef, data: bytes, override: Dict = None) -> Any:
         raw = self._read_bytes_le(data, field.byte_start - 1, field.length)
+        if override and override.get("signed"):
+            raw = self._to_signed(raw, field.length)
         if field.enum:
             return {"value": raw, "label": field.enum.get(raw, str(raw))}
         if field.resolution is not None:
             phys = raw * field.resolution
-            if field.offset is not None:
-                phys += field.offset
+            offset = override["offset"] if (override and "offset" in override) else field.offset
+            if offset is not None:
+                phys += offset
             return round(phys, 4)
         return raw
 
-    def _unpack_int_be(self, field: FieldDef, data: bytes) -> Any:
+    def _unpack_int_be(self, field: FieldDef, data: bytes, override: Dict = None) -> Any:
         raw = self._read_bytes_be(data, field.byte_start - 1, field.length)
+        if override and override.get("signed"):
+            raw = self._to_signed(raw, field.length)
         if field.enum:
             return {"value": raw, "label": field.enum.get(raw, str(raw))}
         if field.resolution is not None:
             phys = raw * field.resolution
-            if field.offset is not None:
-                phys += field.offset
+            offset = override["offset"] if (override and "offset" in override) else field.offset
+            if offset is not None:
+                phys += offset
             return round(phys, 4)
         return raw
 
@@ -111,6 +122,14 @@ class CanCodec:
             raise ValueError(f"数据不足: offset={offset}, length={length}, 数据长度={len(data)}")
         chunk = data[offset:offset + length]
         return int.from_bytes(chunk, "big")
+
+    @staticmethod
+    def _to_signed(raw: int, length: int) -> int:
+        """无符号整数 → 有符号（2 的补码解释，与 encode 的 signed 编码对称）"""
+        bits = length * 8
+        if raw >= (1 << (bits - 1)):
+            raw -= (1 << bits)
+        return raw
 
     # ── 编码 ──────────────────────────────────────
 

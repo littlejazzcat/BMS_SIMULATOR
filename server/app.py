@@ -3,6 +3,7 @@
 import asyncio
 import csv
 import io
+import logging
 import queue
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -15,13 +16,16 @@ from protocol.models.loader import load_protocol
 from protocol.services.can_codec import CanCodec
 from transport.mock import MockTransport
 from transport.zlg import ZlgTransport
+from transport.canalyst import CanalystTransport
 from core.controller import ChargingController
 from core.modes import create_mode, MODE_REGISTRY
 from core.states import ChargingState
 from server.ws import manager
-from server.schemas import CanConnectRequest, ParamsUpdateRequest, ModeRequest
+from server.schemas import CanConnectRequest, ParamsUpdateRequest, ModeRequest, AutoStartRequest
 from server import storage
 from paths import resource_path
+
+logger = logging.getLogger("BMS")
 
 # ── 全局装配对象（lifespan 里初始化） ──────────────
 protocol = None
@@ -30,6 +34,7 @@ private_protocol = None
 transport = None
 transport_mock = None
 transport_zlg = None
+transport_canalyst = None
 controller = None
 mode = None
 
@@ -66,6 +71,8 @@ async def event_pump():
                     "can_id": d.get("can_id"),
                     "data_hex": d.get("data_hex"),
                     "time": time_str,
+                    "tp": d.get("tp"),
+                    "tp_complete": d.get("tp_complete"),
                     "parsed": d.get("parsed"),
                 }
                 frames_batch.append(rec)
@@ -78,7 +85,7 @@ async def event_pump():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global protocol, codec, private_protocol, transport, transport_mock, transport_zlg, controller, mode
+    global protocol, codec, private_protocol, transport, transport_mock, transport_zlg, transport_canalyst, controller, mode
     protocol = load_protocol(PROTOCOL_PATH)
     codec = CanCodec(protocol)
     try:
@@ -87,6 +94,7 @@ async def lifespan(app: FastAPI):
         private_protocol = None
     transport_mock = MockTransport(codec, charging_duration=8.0)
     transport_zlg = ZlgTransport()
+    transport_canalyst = CanalystTransport()
     transport = transport_mock
     mode = create_mode("gb")
     controller = ChargingController(transport, codec, mode=mode, event_cb=event_cb)
@@ -114,6 +122,8 @@ async def get_status():
         "tx_count": transport.get_status()["tx_count"] if transport else 0,
         "rx_count": transport.get_status()["rx_count"] if transport else 0,
         "error": controller._error_msg if controller else "",
+        "auto_start": controller.auto_start if controller else False,
+        "is_charging": controller.is_charging if controller else False,
     }
 
 
@@ -126,12 +136,22 @@ async def get_can_status():
 async def can_connect(req: CanConnectRequest):
     global transport
     transport.disconnect()
-    new_transport = transport_mock if req.device_type == "Mock" else transport_zlg
+    new_transport = (
+        transport_mock if req.device_type == "Mock"
+        else transport_canalyst if req.device_type == "CANalyst-II"
+        else transport_zlg
+    )
     ok = new_transport.connect(req.model_dump())
     transport = new_transport  # 无论成败都指向用户选择的 transport，避免降级到 mock
     if ok:
+        await asyncio.to_thread(storage.clear_messages)  # 连上盒子，数据库归零，本次从 0 计数
         new_transport.register_callback(controller.on_frame)
+        new_transport.register_disconnect_callback(lambda: _on_transport_disconnect(new_transport))
         controller.transport = new_transport
+        logger.info("CAN 已连接: %s ch%s %s", req.device_type, req.channel, req.baudrate)
+    else:
+        err = new_transport.get_status().get("last_error", "")
+        logger.error("CAN 连接失败: %s %s", req.device_type, err)
     event_queue.put({
         "type": "can_connected" if ok else "can_connect_failed",
         "data": new_transport.get_status(),
@@ -139,9 +159,18 @@ async def can_connect(req: CanConnectRequest):
     return {"connected": ok, "status": new_transport.get_status()}
 
 
+def _on_transport_disconnect(tp):
+    """CAN 设备掉线回调（在 transport 接收线程里触发）"""
+    logger.error("CAN 设备掉线: %s", tp.get_status().get("device_type"))
+    event_queue.put({"type": "can_disconnected", "data": tp.get_status()})
+    if controller and controller.is_charging:
+        controller.stop()
+
+
 @app.post("/api/can/disconnect")
 async def can_disconnect():
     transport.disconnect()
+    logger.info("CAN 已断开")
     event_queue.put({"type": "can_disconnected", "data": transport.get_status()})
     return {"connected": False, "status": transport.get_status()}
 
@@ -159,13 +188,15 @@ async def export_messages():
     messages = storage.query_all_messages()
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["方向", "报文", "CAN_ID", "数据HEX", "时间"])
+    writer.writerow(["方向", "报文", "CAN_ID", "数据HEX", "解析", "时间"])
     for m in messages:
+        parsed_txt = " ".join(f"{p['name']}={p['value']}" for p in (m.get("parsed") or []))
         writer.writerow([
             m["direction"],
             m["abbr"],
             f"0x{m['can_id']:08X}" if m["can_id"] is not None else "",
             m["data_hex"],
+            parsed_txt,
             f'="{m["time"]}"',  # 强制文本，避免 Excel 吞掉毫秒
         ])
     csv_text = "\ufeff" + buf.getvalue()  # BOM，Excel 识别 UTF-8
@@ -259,6 +290,13 @@ async def stop_charging():
 @app.get("/api/mode")
 async def get_mode():
     return {"mode": mode.name, "available": list(MODE_REGISTRY.keys())}
+
+
+@app.post("/api/auto_start")
+async def set_auto_start(req: AutoStartRequest):
+    """设置自动启动充电：空闲态检测到 CHM 自动开始充电"""
+    controller.auto_start = req.enabled
+    return {"ok": True, "auto_start": controller.auto_start}
 
 
 @app.post("/api/mode")

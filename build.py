@@ -35,9 +35,10 @@ def main():
     print("执行:", " ".join(cmd))
     subprocess.run(cmd, cwd=ROOT, check=True)
 
-    # 3. 复制 ZLG 驱动（zlgcan.py 用相对路径 ./zlgcan.dll 加载，需放在 exe 旁边）
+    # 3. 复制 CAN 驱动到 exe 旁边（ZLG 与创芯都走相对路径加载）
     shutil.copy2(ROOT / "zlgcan.dll", DIST / "zlgcan.dll")
     shutil.copytree(ROOT / "kerneldlls", DIST / "kerneldlls", dirs_exist_ok=True)
+    shutil.copy2(ROOT / "ControlCAN.dll", DIST / "ControlCAN.dll")
 
     print()
     print("打包完成:", DIST / "BMS_SIMULATOR.exe")

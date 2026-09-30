@@ -35,6 +35,7 @@ class ZlgTransport(CanTransport):
         self._running = False
         self._thread = None
         self._callbacks = []
+        self._disconnect_cbs = []
         self._lock = threading.Lock()
         self._callback_lock = threading.Lock()
         self._tx_count = 0
@@ -150,6 +151,11 @@ class ZlgTransport(CanTransport):
             if cb not in self._callbacks:
                 self._callbacks.append(cb)
 
+    def register_disconnect_callback(self, cb) -> None:
+        with self._callback_lock:
+            if cb not in self._disconnect_cbs:
+                self._disconnect_cbs.append(cb)
+
     def get_status(self) -> dict:
         return {
             "connected": self._connected,
@@ -168,12 +174,21 @@ class ZlgTransport(CanTransport):
     # ── 接收线程 ──────────────────────────────────
 
     def _receive_loop(self):
+        idle_ticks = 0
         while self._running:
             try:
                 rcv_num = self.zcanlib.GetReceiveNum(self.chn_handle, ZCAN_TYPE_CAN)
                 if rcv_num <= 0:
                     time.sleep(0.002)
+                    idle_ticks += 1
+                    # 每约 500ms 检测一次设备在线，拔线后及时停线程、不再刷错误
+                    if idle_ticks >= 250:
+                        idle_ticks = 0
+                        if not self._device_online():
+                            self._handle_disconnect()
+                            break
                     continue
+                idle_ticks = 0
                 read_num = min(rcv_num, 100)
                 rcv_msg, actual_num = self.zcanlib.Receive(self.chn_handle, read_num, 50)
                 if actual_num <= 0:
@@ -193,7 +208,32 @@ class ZlgTransport(CanTransport):
                         self._rx_count += 1
                     self._notify(cf)
             except Exception:
+                # 异常多半是设备掉线，检测后立即停止（避免持续刷错误）
+                if not self._device_online():
+                    self._handle_disconnect()
+                    break
                 time.sleep(0.005)
+
+    def _device_online(self) -> bool:
+        if not self.device_handle:
+            return False
+        try:
+            return bool(self.zcanlib.DeviceOnLine(self.device_handle))
+        except Exception:
+            return False
+
+    def _handle_disconnect(self):
+        """设备掉线：停线程、标记断开、通知上层"""
+        self._running = False
+        self._connected = False
+        self._last_error = "CAN 设备已断开（掉线）"
+        with self._callback_lock:
+            cbs = list(self._disconnect_cbs)
+        for cb in cbs:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def _notify(self, frame: CanFrame):
         with self._callback_lock:

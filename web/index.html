@@ -23,7 +23,7 @@
   .conn-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: #ccc; }
   .conn-dot.online { background: #34a853; }
   .conn-dot.connecting { background: #ff9800; }
-  .conn-status { font-size: 13px; font-weight: 500; padding: 2px 8px; border-radius: 10px; color: #999; background: #f5f5f5; }
+  .conn-status { font-size: 13px; font-weight: 500; padding: 2px 8px; border-radius: 10px; color: #999; background: #f5f5f5; min-width: 68px; text-align: center; }
   .conn-status.online { color: #34a853; background: #e8f5e9; }
   .conn-label { font-size: 12px; color: #999; }
   .conn-divider { width: 1px; height: 24px; background: #e0e0e0; }
@@ -80,7 +80,7 @@
     padding: 10px 14px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; line-height: 1.7;
   }
   .log-placeholder { color: #999; padding: 20px; text-align: center; font-family: -apple-system, sans-serif; }
-  .log-line { white-space: nowrap; }
+  .log-line { white-space: nowrap; content-visibility: auto; contain-intrinsic-size: auto 24px; }
   .log-ts { color: #999; font-size: 12px; }
   .log-dir { font-weight: 700; }
   .log-dir.tx { color: #34a853; }
@@ -113,6 +113,7 @@
     <option value="USBCAN-2E-U">USBCAN-2E-U</option>
     <option value="USBCAN-4E-U">USBCAN-4E-U</option>
     <option value="USBCAN-8E-U">USBCAN-8E-U</option>
+    <option value="CANalyst-II">CANalyst-II</option>
     <option value="Mock">Mock（离线模拟）</option>
   </select>
   <span class="conn-label">通道</span>
@@ -142,6 +143,9 @@
   </select>
   <button id="btnStart" class="btn-success">启动充电</button>
   <button id="btnStop" class="btn-danger" disabled>停止充电</button>
+  <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:4px" title="空闲状态下检测到 CHM 自动开始充电">
+    <input type="checkbox" id="chkAutoStart"> 自动启动
+  </label>
 
   <span class="counters">TX <b id="txCount">0</b> &nbsp; RX <b id="rxCount">0</b></span>
   <span class="err-text" id="errText"></span>
@@ -178,10 +182,11 @@
       <select id="pageSize" style="padding:3px 6px;font-size:12px">
         <option value="50">50</option>
         <option value="100">100</option>
-        <option value="200" selected>200</option>
+        <option value="200">200</option>
         <option value="500">500</option>
         <option value="1000">1000</option>
-        <option value="5000">5000</option>
+        <option value="5000" selected>5000</option>
+        <option value="10000">10000</option>
       </select>
       <span style="flex:1"></span>
       <label style="font-size:12px;color:#666;display:flex;align-items:center;gap:4px">
@@ -225,7 +230,7 @@ Object.defineProperty(window, 'paused', {
   configurable: true,
 });
 let currentOffset = 0;
-let PAGE_SIZE = 200;
+let PAGE_SIZE = 5000;  // 与 pageSize 下拉默认一致
 let total = 0;            // 显示总数（实时态=实时累计，历史态=快照）
 let realtimeTotal = 0;    // 实时累计总数（数据库 COUNT + 新帧）
 let browsing = false;     // true=历史浏览态（翻页看历史），false=实时流态
@@ -238,7 +243,7 @@ function escapeHtml(s) {
 
 function buildLine(m) {
   const dir = m.direction === 'tx' ? 'TX' : 'RX';
-  const abbr = m.abbr || '—';
+  const abbr = (m.abbr || '—') + (m.tp_complete ? '(完整)' : '');
   const id = '0x' + m.can_id.toString(16).toUpperCase().padStart(8, '0');
   let parseHtml = '';
   if (m.parsed && m.parsed.length) {
@@ -246,11 +251,13 @@ function buildLine(m) {
     parseHtml = `<span class="log-parse">${txt}</span>`;
   }
   const cls = 'log-line' + ((m.parsed && m.parsed.length) ? ' clickable' : '');
+  // 完整报文（TP 重组）：数据与前面的分帧重复，只显示帧头 + 解析
+  const hexHtml = m.tp_complete ? '' : `<span class="log-hex">${m.data_hex}</span>`;
   return `<div class="${cls}"><span class="log-ts">${m.time}</span> ` +
     `<span class="log-dir ${m.direction}">${dir}</span> ` +
     `<span class="log-abbr">${abbr}</span> ` +
     `<span class="log-id">${id}</span> ` +
-    `<span class="log-hex">${m.data_hex}</span>` + parseHtml + `</div>`;
+    hexHtml + parseHtml + `</div>`;
 }
 
 let pendingFrames = [];  // 待渲染帧缓冲：WS 收到先堆这里，定时统一刷，避免高频重排
@@ -345,10 +352,16 @@ function backToRealtime() {
 
 async function goPage(dir) {
   if (dir === 'first') {
-    backToRealtime();  // 首页 = 回实时流（清空 + 从当前时刻重新 append）
+    // 首页 = 暂停滚动 + 跳转第一页（历史最新页）；回实时由「取消暂停」承担
+    browsing = true;
+    paused = true;
+    currentOffset = 0;
+    await ensureSnapshot();
+    fetchPage(0);
     return;
   }
   browsing = true;  // 进历史浏览态
+  paused = true;    // 统一冻结状态：翻页也勾选「暂停滚动」，setter 自动同步复选框
   await ensureSnapshot();  // 首次进历史态先锚定快照，避免分页窗口漂移
   if (dir === 'prev') currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
   else if (dir === 'next') currentOffset = Math.min(Math.max(0, total - PAGE_SIZE), currentOffset + PAGE_SIZE);
@@ -383,14 +396,16 @@ function connectWS() {
     const ev = JSON.parse(e.data);
     if (ev.type === 'state_changed') {
       $('stateText').textContent = ev.data.state;
-      if (ev.data.state === '充电完成' || ev.data.state === '已停止' || ev.data.state === '错误状态') {
-        $('btnStart').disabled = false;
-        $('btnStop').disabled = true;
-      }
+      if (typeof ev.data.is_charging !== 'undefined') currentIsCharging = !!ev.data.is_charging;
+      updateButtons();
     } else if (ev.type === 'error') {
       $('errText').textContent = '⚠ ' + ev.data.message;
     } else if (ev.type === 'can_connected') {
       updateCanUI(true);
+      // 连接时后端已清空数据库，前端计数同步归零，本次从 0 开始
+      realtimeTotal = 0;
+      total = 0;
+      backToRealtime();
     } else if (ev.type === 'can_disconnected') {
       updateCanUI(false);
     } else if (ev.type === 'can_connect_failed') {
@@ -406,6 +421,16 @@ function updateCanUI(on) {
   $('canState').className = 'conn-status ' + (on ? 'online' : '');
   $('btnConnect').disabled = on;
   $('btnDisconnect').disabled = !on;
+}
+
+// 空闲/结束状态（非运行态）：未启动 / 充电完成 / 已停止 / 错误状态
+let currentIsCharging = false;  // 运行态标志（后端 is_charging）
+
+// 统一按钮状态：运行中禁用「启动充电」；开了自动启动也禁用「启动充电」
+function updateButtons() {
+  const autoStart = $('chkAutoStart').checked;
+  $('btnStart').disabled = currentIsCharging || autoStart;
+  $('btnStop').disabled = !currentIsCharging;
 }
 
 // ── BMS 参数表单：报文 Tab + 字段 ──
@@ -589,6 +614,12 @@ $('btnStop').onclick = async () => {
   $('btnStop').disabled = true;
 };
 
+$('chkAutoStart').onchange = async () => {
+  const enabled = $('chkAutoStart').checked;
+  await fetch('/api/auto_start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({enabled}) });
+  updateButtons();  // 自动启动开关变化，刷新按钮状态
+};
+
 $('btnApply').onclick = async () => {
   const params = collectParams();
   await fetch('/api/params', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({params}) });
@@ -623,7 +654,15 @@ $('btnFirst').onclick = () => goPage('first');
 $('btnPrev').onclick = () => goPage('prev');
 $('btnNext').onclick = () => goPage('next');
 $('btnLast').onclick = () => goPage('last');
-$('pageSize').onchange = async () => { PAGE_SIZE = parseInt($('pageSize').value); browsing = true; await ensureSnapshot(); fetchPage(0); };
+$('pageSize').onchange = async () => {
+  PAGE_SIZE = parseInt($('pageSize').value);
+  // 仅历史态时重拉当前页；不改 browsing/paused（不进入 pause 冻结态）
+  if (browsing) {
+    currentOffset = 0;
+    await ensureSnapshot();
+    fetchPage(currentOffset);
+  }
+};
 
 $('btnExport').onclick = () => {
   window.location.href = '/api/messages/export';
@@ -662,6 +701,10 @@ $('btnClear').onclick = async () => {
   $('rxCount').textContent = s.rx_count;
   const st = await (await fetch('/api/status')).json();
   $('stateText').textContent = st.state;
+  currentIsCharging = !!st.is_charging;  // 运行态标志
+  $('chkAutoStart').checked = !!st.auto_start;  // 同步自动启动开关
+  PAGE_SIZE = parseInt($('pageSize').value) || 5000;  // 同步分页大小（与下拉一致）
+  updateButtons();  // 初始化按钮状态
   // 初始化总数（数据库全量 COUNT），避免翻页时 total 从 0 跳变
   try {
     const m = await (await fetch('/api/messages?offset=0&limit=1')).json();
