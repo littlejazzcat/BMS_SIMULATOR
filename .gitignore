@@ -7,6 +7,7 @@ protocol_converter/
 architecture/
 update/
 issue/
+需求/
 tests/
 GBT27930/
 
@@ -18,6 +19,7 @@ __pycache__/
 .Python
 
 # ===== 打包产物（PyInstaller）=====
+build.py
 build/
 dist/
 *.spec

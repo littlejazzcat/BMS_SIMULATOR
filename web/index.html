@@ -421,6 +421,12 @@ function updateCanUI(on) {
   $('canState').className = 'conn-status ' + (on ? 'online' : '');
   $('btnConnect').disabled = on;
   $('btnDisconnect').disabled = !on;
+  setConnParamsLocked(on);  // 连接后锁定设备/通道/波特率，避免显示与实际连接参数不一致
+}
+
+// 锁定连接参数（设备类型/通道/波特率）
+function setConnParamsLocked(locked) {
+  ['devType', 'channel', 'baudrate'].forEach(id => { $(id).disabled = locked; });
 }
 
 // 空闲/结束状态（非运行态）：未启动 / 充电完成 / 已停止 / 错误状态
@@ -575,6 +581,7 @@ $('btnConnect').onclick = async () => {
   $('errText').textContent = '';
   $('canDot').className = 'conn-dot connecting';
   $('canState').textContent = '连接中…';
+  setConnParamsLocked(true);  // 连接期间即锁定，防止参数在请求途中被改
   const body = {
     device_type: $('devType').value,
     channel: Number($('channel').value),
@@ -696,6 +703,12 @@ $('btnClear').onclick = async () => {
   connectWS();
   await loadProtocol();
   const s = await (await fetch('/api/can/status')).json();
+  // 刷新后如实回填当前连接参数（避免下拉框回到默认值、与实际连接不符）
+  if (s.connected) {
+    if (s.device_type) $('devType').value = s.device_type;
+    if (typeof s.channel !== 'undefined' && s.channel !== null) $('channel').value = String(s.channel);
+    if (s.baudrate) $('baudrate').value = String(s.baudrate);
+  }
   updateCanUI(s.connected);
   $('txCount').textContent = s.tx_count;
   $('rxCount').textContent = s.rx_count;
