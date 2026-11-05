@@ -93,8 +93,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         private_protocol = None
     transport_mock = MockTransport(codec, charging_duration=8.0)
-    transport_zlg = ZlgTransport()
-    transport_canalyst = CanalystTransport()
+    # 各传输层构造失败不应阻断服务启动（驱动 DLL 缺失等），仅该设备不可用
+    try:
+        transport_zlg = ZlgTransport()
+    except Exception as e:
+        logger.exception("ZlgTransport 初始化失败，ZLG 设备将不可用: %s", e)
+        transport_zlg = None
+    try:
+        transport_canalyst = CanalystTransport()
+    except Exception as e:
+        logger.exception("CanalystTransport 初始化失败，CANalyst-II 将不可用: %s", e)
+        transport_canalyst = None
     transport = transport_mock
     mode = create_mode("gb")
     controller = ChargingController(transport, codec, mode=mode, event_cb=event_cb)
@@ -103,7 +112,10 @@ async def lifespan(app: FastAPI):
     pump_task = asyncio.create_task(event_pump())
     yield
     transport_mock.disconnect()
-    transport_zlg.disconnect()
+    if transport_zlg is not None:
+        transport_zlg.disconnect()
+    if transport_canalyst is not None:
+        transport_canalyst.disconnect()
     controller.stop()
     pump_task.cancel()
 
@@ -141,6 +153,12 @@ async def can_connect(req: CanConnectRequest):
         else transport_canalyst if req.device_type == "CANalyst-II"
         else transport_zlg
     )
+    if new_transport is None:
+        # 对应 transport 初始化失败（如驱动加载异常），明确报错而不抛 500
+        return {
+            "connected": False,
+            "status": {"connected": False, "last_error": "该设备驱动不可用，请查看启动日志"},
+        }
     ok = new_transport.connect(req.model_dump())
     transport = new_transport  # 无论成败都指向用户选择的 transport，避免降级到 mock
     if ok:

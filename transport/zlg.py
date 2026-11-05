@@ -4,6 +4,7 @@
 """
 
 import ctypes
+import logging
 import threading
 import time
 
@@ -17,6 +18,8 @@ from zlgcan import (
 
 from transport.base import CanTransport, CanFrame
 
+logger = logging.getLogger(__name__)
+
 # 前端 device_type 字符串 → ZCAN 设备类型常量
 DEVICE_TYPE_MAP = {
     "USBCAN-E-U": ZCAN_USBCAN_E_U,
@@ -28,7 +31,8 @@ DEVICE_TYPE_MAP = {
 
 class ZlgTransport(CanTransport):
     def __init__(self):
-        self.zcanlib = ZCAN()
+        # 懒加载：驱动 / DLL 缺失时只影响 ZLG 设备，不拖垮服务启动
+        self.zcanlib = None
         self.device_handle = None
         self.chn_handle = None
         self._connected = False
@@ -47,12 +51,28 @@ class ZlgTransport(CanTransport):
 
     # ── CanTransport 接口 ──────────────────────────
 
+    def _ensure_lib(self) -> bool:
+        """懒加载 zlgcan.dll；失败只记录 last_error，不抛异常"""
+        if self.zcanlib is not None:
+            return True
+        try:
+            self.zcanlib = ZCAN()
+            return True
+        except Exception as e:
+            self._last_error = f"加载 zlgcan.dll 失败: {e}"
+            logger.error("ZLG 驱动加载失败（ZLG 设备不可用，其余功能不受影响）: %s", e)
+            return False
+
     def connect(self, config: dict = None) -> bool:
         config = config or {}
         self._device_type_str = config.get("device_type", "USBCAN-2E-U")
         self._channel = int(config.get("channel", 0))
         self._baudrate = int(config.get("baudrate", 250000))
         dev_type = DEVICE_TYPE_MAP.get(self._device_type_str, ZCAN_USBCAN_2E_U)
+
+        # 驱动不可用时直接失败返回，不抛异常
+        if not self._ensure_lib():
+            return False
 
         try:
             # 1. 打开设备
